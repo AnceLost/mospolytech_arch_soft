@@ -31,7 +31,22 @@ builder.Services.AddAuthorization();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IIncidentService, IncidentService>();
 
+// Включить CORS (разрешить запросы с любого источника — только для разработки!)
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowAll", policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyMethod()
+              .AllowAnyHeader();
+    });
+});
+
 var app = builder.Build();
+
+app.UseCors("AllowAll");
+app.UseDefaultFiles();
+app.UseStaticFiles();
 
 // Инициализация тестовых данных
 using (var scope = app.Services.CreateScope())

@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Управление происшествиями (Прототип)</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 20px auto; padding: 0 20px; }
+        .hidden { display: none; }
+        .error { color: red; margin: 10px 0; }
+        .incident { border: 1px solid #ccc; padding: 10px; margin: 10px 0; border-radius: 5px; }
+        button { margin-right: 5px; }
+        input, select { margin: 5px 0; padding: 5px; width: 100%; box-sizing: border-box; }
+        .form-group { margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Прототип системы регистрации происшествий</h1>
+
+    <!-- Блок авторизации -->
+    <div id="authBlock">
+        <h2>Вход в систему</h2>
+        <div class="form-group">
+            <label>Email:</label>
+            <input type="email" id="email" value="admin@test.com" />
+        </div>
+        <div class="form-group">
+            <label>Пароль:</label>
+            <input type="password" id="password" value="123456" />
+        </div>
+        <button onclick="login()">Войти</button>
+        <div id="loginError" class="error"></div>
+    </div>
+
+    <!-- Блок работы с заявками (показывается после входа) -->
+    <div id="appBlock" class="hidden">
+        <p>
+            Вы вошли как: <span id="userInfo"></span>
+            <button onclick="logout()">Выйти</button>
+        </p>
+
+        <h2>Список происшествий</h2>
+        <button onclick="loadIncidents()">Обновить список</button>
+        <div id="incidentsList"></div>
+
+        <h3>Создать новую заявку</h3>
+        <div class="form-group">
+            <input type="text" id="newTitle" placeholder="Заголовок" />
+        </div>
+        <div class="form-group">
+            <textarea id="newDescription" placeholder="Описание"></textarea>
+        </div>
+        <div class="form-group">
+            <select id="newCategory">
+                <option value="1">Общая категория</option>
+            </select>
+        </div>
+        <button onclick="createIncident()">Создать</button>
+        <div id="createError" class="error"></div>
+
+        <h3>Редактирование заявки (выберите ID)</h3>
+        <div class="form-group">
+            <input type="number" id="editId" placeholder="ID заявки" />
+        </div>
+        <div class="form-group">
+            <input type="text" id="editTitle" placeholder="Новый заголовок" />
+        </div>
+        <div class="form-group">
+            <textarea id="editDescription" placeholder="Новое описание"></textarea>
+        </div>
+        <div class="form-group">
+            <select id="editStatus">
+                <option value="0">Новая</option>
+                <option value="1">В работе</option>
+                <option value="2">Решена</option>
+                <option value="3">Закрыта</option>
+            </select>
+        </div>
+        <button onclick="updateIncident()">Обновить</button>
+        <button onclick="deleteIncident()" id="deleteBtn" style="background-color: #ffcccc;">Удалить (только Admin)</button>
+        <div id="editError" class="error"></div>
+    </div>
+
+    <script>
+        // Базовый URL API (если запускаете с профилем https, порт может отличаться)
+        const API_BASE = window.location.origin; // используем тот же хост/порт что и у страницы
+
+        let authToken = localStorage.getItem('token');
+        let currentUser = null;
+
+        // При загрузке страницы проверяем, есть ли токен
+        window.onload = () => {
+            if (authToken) {
+                try {
+                    const payload = JSON.parse(atob(authToken.split('.')[1]));
+                    currentUser = {
+                        id: payload['http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier'],
+                        role: payload['http://schemas.microsoft.com/ws/2008/06/identity/claims/role']
+                    };
+                    showApp();
+                } catch (e) {
+                    localStorage.removeItem('token');
+                    authToken = null;
+                }
+            }
+        };
+
+        function showApp() {
+            document.getElementById('authBlock').classList.add('hidden');
+            document.getElementById('appBlock').classList.remove('hidden');
+            document.getElementById('userInfo').innerText = 
+                `ID: ${currentUser.id}, Роль: ${currentUser.role}`;
+            loadIncidents();
+            // Показывать или скрывать кнопку удаления в зависимости от роли
+            document.getElementById('deleteBtn').style.display = 
+                (currentUser.role === 'Admin') ? 'inline-block' : 'none';
+        }
+
+        async function login() {
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            const errorDiv = document.getElementById('loginError');
+            errorDiv.innerText = '';
+
+            try {
+                const response = await fetch(`${API_BASE}/api/auth/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password })
+                });
+
+                if (!response.ok) throw new Error('Неверный email или пароль');
+
+                const data = await response.json();
+                authToken = data.token;
+                localStorage.setItem('token', authToken);
+
+                const payload = JSON.parse(atob(authToken.split('.')[1]));
+                currentUser = {
+                    id: payload['http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier'],
+                    role: payload['http://schemas.microsoft.com/ws/2008/06/identity/claims/role']
+                };
+
+                showApp();
+            } catch (err) {
+                errorDiv.innerText = err.message;
+            }
+        }
+
+        function logout() {
+            localStorage.removeItem('token');
+            authToken = null;
+            currentUser = null;
+            document.getElementById('authBlock').classList.remove('hidden');
+            document.getElementById('appBlock').classList.add('hidden');
+        }
+
+        async function apiCall(url, method = 'GET', body = null) {
+            const headers = {
+                'Authorization': `Bearer ${authToken}`,
+                'Content-Type': 'application/json'
+            };
+            const options = { method, headers };
+            if (body) options.body = JSON.stringify(body);
+
+            const response = await fetch(`${API_BASE}${url}`, options);
+            if (response.status === 401) {
+                logout();
+                throw new Error('Сессия истекла. Войдите заново.');
+            }
+            if (!response.ok) {
+                const text = await response.text();
+                throw new Error(text || `Ошибка ${response.status}`);
+            }
+            return response.status === 204 ? null : await response.json();
+        }
+
+        async function loadIncidents() {
+            const listDiv = document.getElementById('incidentsList');
+            try {
+                const incidents = await apiCall('/api/incidents');
+                if (incidents.length === 0) {
+                    listDiv.innerHTML = '<p>Нет заявок</p>';
+                    return;
+                }
+                listDiv.innerHTML = incidents.map(inc => `
+                    <div class="incident">
+                        <strong>ID ${inc.id}</strong> — ${inc.title}<br>
+                        Статус: ${getStatusName(inc.status)} | Создано: ${new Date(inc.createdAt).toLocaleString()}<br>
+                        <em>${inc.description}</em>
+                    </div>
+                `).join('');
+            } catch (err) {
+                listDiv.innerHTML = `<div class="error">Ошибка загрузки: ${err.message}</div>`;
+            }
+        }
+
+        function getStatusName(status) {
+            return ['Новая', 'В работе', 'Решена', 'Закрыта'][status] || status;
+        }
+
+        async function createIncident() {
+            const title = document.getElementById('newTitle').value;
+            const description = document.getElementById('newDescription').value;
+            const categoryId = parseInt(document.getElementById('newCategory').value);
+            const errorDiv = document.getElementById('createError');
+            errorDiv.innerText = '';
+
+            if (!title || !description) {
+                errorDiv.innerText = 'Заполните заголовок и описание';
+                return;
+            }
+
+            try {
+                await apiCall('/api/incidents', 'POST', { title, description, categoryId });
+                document.getElementById('newTitle').value = '';
+                document.getElementById('newDescription').value = '';
+                loadIncidents();
+            } catch (err) {
+                errorDiv.innerText = err.message;
+            }
+        }
+
+        async function updateIncident() {
+            const id = document.getElementById('editId').value;
+            const title = document.getElementById('editTitle').value;
+            const description = document.getElementById('editDescription').value;
+            const status = parseInt(document.getElementById('editStatus').value);
+            const errorDiv = document.getElementById('editError');
+            errorDiv.innerText = '';
+
+            if (!id) {
+                errorDiv.innerText = 'Введите ID заявки';
+                return;
+            }
+
+            try {
+                await apiCall(`/api/incidents/${id}`, 'PUT', { title, description, status });
+                loadIncidents();
+                document.getElementById('editId').value = '';
+                document.getElementById('editTitle').value = '';
+                document.getElementById('editDescription').value = '';
+            } catch (err) {
+                errorDiv.innerText = err.message;
+            }
+        }
+
+        async function deleteIncident() {
+            const id = document.getElementById('editId').value;
+            const errorDiv = document.getElementById('editError');
+            errorDiv.innerText = '';
+
+            if (!id) {
+                errorDiv.innerText = 'Введите ID заявки для удаления';
+                return;
+            }
+            if (!confirm(`Удалить заявку #${id}?`)) return;
+
+            try {
+                await apiCall(`/api/incidents/${id}`, 'DELETE');
+                loadIncidents();
+                document.getElementById('editId').value = '';
+            } catch (err) {
+                errorDiv.innerText = err.message;
+            }
+        }
+    </script>
+</body>
+</html>
