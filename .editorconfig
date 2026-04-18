@@ -1,0 +1,69 @@
+# EditorConfig helps developers define and maintain consistent
+# coding styles between different editors and IDEs
+# https://editorconfig.org
+
+root = true
+
+[*]
+indent_style = space
+indent_size = 4
+end_of_line = crlf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[*.{csproj,vbproj,vcxproj,vcxproj.filters,proj,projitems,shproj}]
+indent_size = 2
+
+[*.{props,targets,ruleset,config,nuspec,resx,vsixmanifest,vsct}]
+indent_size = 2
+
+[*.json]
+indent_size = 2
+
+[*.{xml,xsd,xslt}]
+indent_size = 2
+
+[*.{htm,html,css,scss,less}]
+indent_size = 2
+
+[*.{js,ts,tsx}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.{cs,vb}]
+# C# and VB code style settings
+dotnet_sort_system_directives_first = true
+dotnet_separate_import_directive_groups = false
+
+# Use 'var' preferences
+csharp_style_var_for_built_in_types = true:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion
+csharp_style_var_elsewhere = true:suggestion
+
+# Expression-bodied members
+csharp_style_expression_bodied_methods = when_on_single_line:suggestion
+csharp_style_expression_bodied_constructors = when_on_single_line:suggestion
+csharp_style_expression_bodied_properties = true:suggestion
+csharp_style_expression_bodied_accessors = true:suggestion
+
+# Naming conventions
+dotnet_naming_style.pascal_case_style.capitalization = pascal_case
+
+# Public members should be PascalCase
+dotnet_naming_rule.public_members_should_be_pascal_case.severity = suggestion
+dotnet_naming_rule.public_members_should_be_pascal_case.symbols = public_symbols
+dotnet_naming_rule.public_members_should_be_pascal_case.style = pascal_case_style
+dotnet_naming_symbols.public_symbols.applicable_kinds = property, method, field, event, delegate
+dotnet_naming_symbols.public_symbols.applicable_accessibilities = public
+
+# Private fields should be camelCase with underscore prefix
+dotnet_naming_style.underscore_camel_case.capitalization = camel_case
+dotnet_naming_style.underscore_camel_case.required_prefix = _
+dotnet_naming_rule.private_fields_should_be_underscore_camel_case.severity = suggestion
+dotnet_naming_rule.private_fields_should_be_underscore_camel_case.symbols = private_fields
+dotnet_naming_rule.private_fields_should_be_underscore_camel_case.style = underscore_camel_case
+dotnet_naming_symbols.private_fields.applicable_kinds = field
+dotnet_naming_symbols.private_fields.applicable_accessibilities = private
