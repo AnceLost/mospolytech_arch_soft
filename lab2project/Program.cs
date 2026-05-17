@@ -1,9 +1,19 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using App.Metrics;
+using App.Metrics.Formatters.Prometheus;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Serilog;
+
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Information()
+    .WriteTo.Console()
+    .WriteTo.File("logs/app.log", rollingInterval: RollingInterval.Day, restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Warning)
+    .CreateLogger();
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -42,6 +52,17 @@ builder.Services.AddCors(options =>
     });
 });
 
+// Метрики
+builder.Services.AddMetrics((App.Metrics.IMetricsBuilder builder) => { });
+builder.Services.AddMetricsEndpoints(options => {
+    options.MetricsEndpointOutputFormatter = new MetricsPrometheusTextOutputFormatter();
+});
+builder.Services.AddMetricsReportingHostedService(); // публикует метрики в /metrics
+
+// Health Checks
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<AppDbContext>("database", tags: new[] { "ready" });
+
 var app = builder.Build();
 
 app.UseCors("AllowAll");
@@ -49,19 +70,21 @@ app.UseDefaultFiles();
 app.UseStaticFiles();
 
 // Инициализация тестовых данных
-using (var scope = app.Services.CreateScope())
-{
-    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    db.Users.Add(new User { Id = 1, Email = "admin@test.com", FullName = "Администратор", 
-        PasswordHash = BCrypt.Net.BCrypt.HashPassword("123456"), Role = UserRole.Admin });
-    db.Users.Add(new User { Id = 2, Email = "user@test.com", FullName = "Пользователь", 
-        PasswordHash = BCrypt.Net.BCrypt.HashPassword("123456"), Role = UserRole.User });
-    db.IncidentCategories.Add(new IncidentCategory { Id = 1, Name = "Общая" });
-    db.SaveChanges();
-}
+// using (var scope = app.Services.CreateScope())
+// {
+//     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+//     db.Users.Add(new User { Id = 1, Email = "admin@test.com", FullName = "Администратор", 
+//         PasswordHash = BCrypt.Net.BCrypt.HashPassword("123456"), Role = UserRole.Admin });
+//     db.Users.Add(new User { Id = 2, Email = "user@test.com", FullName = "Пользователь", 
+//         PasswordHash = BCrypt.Net.BCrypt.HashPassword("123456"), Role = UserRole.User });
+//     db.IncidentCategories.Add(new IncidentCategory { Id = 1, Name = "Общая" });
+//     db.SaveChanges();
+// }
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseMetricsEndpoint(); // /metrics
+app.UseMetricsAllEndpoints(); // /metrics-text, /metrics-json и т.д.
 
 // === API Endpoints ===
 app.MapPost("/api/auth/login", async (LoginRequest req, IAuthService auth) =>
@@ -111,6 +134,20 @@ app.MapDelete("/api/incidents/{id}", [Authorize(Roles = "Admin")] async (int id,
     return Results.NoContent();
 });
 
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    ResponseWriter = async (context, report) =>
+    {
+        context.Response.ContentType = "application/json";
+        var result = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            status = report.Status.ToString(),
+            checks = report.Entries.Select(e => new { name = e.Key, status = e.Value.Status.ToString(), description = e.Value.Description })
+        });
+        await context.Response.WriteAsync(result);
+    }
+});
+
 app.Run();
 
 // ========== Модели ==========
@@ -119,8 +156,8 @@ public record CreateIncidentRequest(string Title, string Description, int Catego
 public record UpdateIncidentRequest(string Title, string Description, IncidentStatus Status);
 public record IncidentResponse(int Id, string Title, string Description, IncidentStatus Status, DateTime CreatedAt);
 
-public enum UserRole { User, Admin }
-public enum IncidentStatus { New, InProgress, Resolved, Closed }
+public enum UserRole { User, Admin, Executor }
+public enum IncidentStatus { New, InProgress, Pending, Resolved, Closed }
 
 public class User
 {
@@ -148,6 +185,8 @@ public class Incident
     public IncidentCategory Category { get; set; } = null!;
     public int CreatedById { get; set; }
     public User CreatedBy { get; set; } = null!;
+    public int? AssignedToId { get; set; }
+    public User? AssignedTo { get; set; }
 }
 
 // ========== DbContext ==========
@@ -157,6 +196,25 @@ public class AppDbContext : DbContext
     public DbSet<User> Users => Set<User>();
     public DbSet<Incident> Incidents => Set<Incident>();
     public DbSet<IncidentCategory> IncidentCategories => Set<IncidentCategory>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        // Существующая связь CreatedBy
+        modelBuilder.Entity<Incident>()
+            .HasOne(i => i.CreatedBy)
+            .WithMany()
+            .HasForeignKey(i => i.CreatedById)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        // Новая связь AssignedTo
+        modelBuilder.Entity<Incident>()
+            .HasOne(i => i.AssignedTo)              // У одного Incident один AssignedTo
+            .WithMany()                             // У User может быть много назначенных Incidents
+            .HasForeignKey(i => i.AssignedToId)     // Внешний ключ — AssignedToId
+            .OnDelete(DeleteBehavior.Restrict);     // Запрещаем каскадное удаление
+
+        // ... другие настройки
+    }
 }
 
 // ========== Сервисы ==========
@@ -201,7 +259,9 @@ public interface IIncidentService
     Task<List<IncidentResponse>> GetListAsync(int userId, UserRole role);
     Task<IncidentResponse?> GetByIdAsync(int id, int userId, UserRole role);
     Task<IncidentResponse> UpdateAsync(int id, UpdateIncidentRequest req, int userId, UserRole role);
+    Task<IncidentResponse?> UpdateStatusAsync(int id, IncidentStatus newStatus, string? comment, int userId, UserRole role);
     Task DeleteAsync(int id);
+    
 }
 
 public class IncidentService : IIncidentService
@@ -211,6 +271,8 @@ public class IncidentService : IIncidentService
 
     public async Task<IncidentResponse> CreateAsync(CreateIncidentRequest req, int userId)
     {
+        Log.Information("Создание новой заявки пользователем {UserId}", userId);
+
         var incident = new Incident
         {
             Title = req.Title,
@@ -254,6 +316,40 @@ public class IncidentService : IIncidentService
         return new IncidentResponse(incident.Id, incident.Title, incident.Description, incident.Status, incident.CreatedAt);
     }
 
+    public async Task<IncidentResponse?> UpdateStatusAsync(int id, IncidentStatus newStatus, string? comment, int userId, UserRole role)
+    {
+        var incident = await _db.Incidents.FindAsync(id);
+        if (incident == null) return null;
+
+        // Проверка прав: админ, диспетчер или назначенный исполнитель (упрощенно)
+        bool canEdit = role == UserRole.Admin || role == UserRole.Executor ||
+                    (role == UserRole.User && incident.AssignedToId == userId);
+        if (!canEdit) throw new UnauthorizedAccessException("Недостаточно прав для изменения статуса");
+
+        // Проверка допустимых переходов (восстанавливаем прежнюю логику)
+        if (!IsValidStatusTransition(incident.Status, newStatus))
+            throw new InvalidOperationException($"Переход из {incident.Status} в {newStatus} недопустим");
+
+        incident.Status = newStatus;
+        // Если хотите, можно добавить запись в историю и логирование
+        await _db.SaveChangesAsync();
+
+        return await GetByIdAsync(id, userId, role);
+    }
+
+    // Вспомогательный метод проверки переходов (добавьте в класс IncidentService)
+    private static bool IsValidStatusTransition(IncidentStatus current, IncidentStatus next) => (current, next) switch
+    {
+        (IncidentStatus.New, IncidentStatus.InProgress) => true,
+        (IncidentStatus.New, IncidentStatus.Closed) => true,
+        (IncidentStatus.InProgress, IncidentStatus.Pending) => true,
+        (IncidentStatus.InProgress, IncidentStatus.Resolved) => true,
+        (IncidentStatus.Pending, IncidentStatus.InProgress) => true,
+        (IncidentStatus.Pending, IncidentStatus.Resolved) => true,
+        (IncidentStatus.Resolved, IncidentStatus.Closed) => true,
+        _ => false
+    };
+
     public async Task DeleteAsync(int id)
     {
         var incident = await _db.Incidents.FindAsync(id);
@@ -264,3 +360,5 @@ public class IncidentService : IIncidentService
         }
     }
 }
+
+public partial class Program { }
